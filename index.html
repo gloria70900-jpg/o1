@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quest MR Hologram Stage</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #111;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #ui-container {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      z-index: 100;
+      background: rgba(20, 24, 35, 0.85);
+      padding: 30px 40px;
+      border-radius: 16px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(8px);
+    }
+    .custom-file-upload {
+      border: 2px dashed #00e5ff;
+      color: #fff;
+      padding: 14px 28px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 16px;
+      transition: all 0.2s;
+    }
+    .custom-file-upload:hover {
+      background: rgba(0, 229, 255, 0.15);
+    }
+    input[type="file"] {
+      display: none;
+    }
+    #enter-xr {
+      display: none;
+      padding: 16px 36px;
+      font-size: 18px;
+      font-weight: bold;
+      color: #fff;
+      background: linear-gradient(135deg, #007aff, #00c6ff);
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      box-shadow: 0 4px 15px rgba(0, 122, 255, 0.4);
+    }
+    #enter-xr:hover {
+      filter: brightness(1.1);
+    }
+    #file-status {
+      color: #aaa;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="ui-container">
+    <label class="custom-file-upload">
+      📁 그린스크린 MP4 영상 선택
+      <input type="file" id="video-input" accept="video/mp4,video/*">
+    </label>
+    <div id="file-status">영상을 선택해 주세요.</div>
+    <button id="enter-xr">✨ 웅장한 MR 모드로 시작 (Enter AR)</button>
+  </div>
+
+  <video id="video" loop playsinline crossOrigin="anonymous" style="display:none;"></video>
+
+  <script>
+    const video = document.getElementById('video');
+    const videoInput = document.getElementById('video-input');
+    const enterBtn = document.getElementById('enter-xr');
+    const fileStatus = document.getElementById('file-status');
+    const uiContainer = document.getElementById('ui-container');
+
+    // 1. 영상 파일 업로드 처리 (브라우저 메모리 Blob으로 즉각 연결)
+    videoInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        const fileURL = URL.createObjectURL(file);
+        video.src = fileURL;
+        video.load();
+        fileStatus.innerText = `선택됨: ${file.name}`;
+        fileStatus.style.color = '#00e5ff';
+        enterBtn.style.display = 'block';
+      }
+    });
+
+    // 2. Three.js 씬 및 WebXR 렌더러 설정
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 30);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    // 3. 정밀 크로마키 셰이더 (초록색 투명화 + 색상 가장자리 번짐 제거)
+    const videoTexture = new THREE.VideoTexture(video);
+    videoTexture.minFilter = THREE.LinearFilter;
+    videoTexture.magFilter = THREE.LinearFilter;
+
+    const chromaShader = {
+      uniforms: {
+        tex: { value: videoTexture },
+        keyColor: { value: new THREE.Color(0.42, 0.90, 0.55) }, // 영상의 주요 그린스크린 RGB
+        threshold: { value: 0.38 },
+        feather: { value: 0.12 }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tex;
+        uniform vec3 keyColor;
+        uniform float threshold;
+        uniform float feather;
+        varying vec2 vUv;
+
+        void main() {
+          vec4 color = texture2D(tex, vUv);
+          float dist = distance(color.rgb, keyColor);
+          float alpha = smoothstep(threshold, threshold + feather, dist);
+          
+          // 녹색 반사광(Spill) 억제
+          if (dist < threshold + feather * 2.0) {
+            color.g = min(color.g, max(color.r, color.b) * 1.05);
+          }
+
+          gl_FragColor = vec4(color.rgb, color.a * alpha);
+        }
+      `
+    };
+
+    const chromaMaterial = new THREE.ShaderMaterial({
+      uniforms: chromaShader.uniforms,
+      vertexShader: chromaShader.vertexShader,
+      fragmentShader: chromaShader.fragmentShader,
+      transparent: true,
+      side: THREE.DoubleSide
+    });
+
+    // 4. 웅장한 스케일의 초대형 곡면 메쉬 생성 (시야를 감싸는 원통형 스테이지)
+    // 반경 3.5m, 높이 3.4m, 중심 각도 1.4 라디안 (약 80도 시야각 곡면)
+    const radius = 3.5;
+    const height = 3.4;
+    const radialSegments = 48;
+    const thetaLength = 1.4; 
+    const thetaStart = Math.PI * 1.5 - thetaLength / 2;
+
+    const stageGeometry = new THREE.CylinderGeometry(
+      radius, radius, height, radialSegments, 1, true, thetaStart, thetaLength
+    );
+    // 내부를 바라보도록 스케일 반전
+    stageGeometry.scale(-1, 1, 1);
+
+    const stageMesh = new THREE.Mesh(stageGeometry, chromaMaterial);
+    // 내 앞 2.8m 전방, 살짝 웅장하게 위로 솟아오른 배치
+    stageMesh.position.set(0, 0.2, -1.8);
+    scene.add(stageMesh);
+
+    // 5. WebXR MR (Passthrough) 세션 시작
+    enterBtn.addEventListener('click', async () => {
+      video.play();
+      if (navigator.xr) {
+        const session = await navigator.xr.requestSession('immersive-ar', {
+          requiredFeatures: ['local-floor'],
+          optionalFeatures: ['dom-overlay'],
+          domOverlay: { root: document.body }
+        });
+        renderer.xr.setSession(session);
+        uiContainer.style.display = 'none';
+
+        session.addEventListener('end', () => {
+          uiContainer.style.display = 'flex';
+          video.pause();
+        });
+      }
+    });
+
+    renderer.setAnimationLoop(() => {
+      renderer.render(scene, camera);
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
